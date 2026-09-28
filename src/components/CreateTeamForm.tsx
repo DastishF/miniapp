@@ -1,7 +1,8 @@
 // src/components/CreateTeamForm.tsx
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { collection, addDoc } from "firebase/firestore";
 import { db } from "../services/firebaseConfig";
+import { useTelegramUser } from "../hooks/useTelegramUser"; // <-- Наш новый хук
 
 import { Button } from "./ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
@@ -27,6 +28,8 @@ interface CreateTeamFormProps {
 }
 
 export function CreateTeamForm({ onBack, onTeamCreated }: CreateTeamFormProps) {
+  const user = useTelegramUser(); // <-- Подхватываем юзера из Telegram
+
   const [teamName, setTeamName] = useState("");
   const [description, setDescription] = useState("");
   const [adminName, setAdminName] = useState("");
@@ -34,14 +37,23 @@ export function CreateTeamForm({ onBack, onTeamCreated }: CreateTeamFormProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  // 🔥 АВТОВСТАВКА: Как только хук получил данные, заполняем поле имени
+  useEffect(() => {
+    if (user) {
+      const fullName = `${user.firstName} ${user.lastName || ""}`.trim();
+      setAdminName(fullName);
+    }
+  }, [user]);
+
   const generateTeamCode = () =>
     Math.random().toString(36).substring(2, 8).toUpperCase();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!teamName.trim() || !adminName.trim() || !adminPhone.trim()) {
-      setError("Заполните обязательные поля");
+    // Телефон сделали необязательным, проверяем только Название и ФИО
+    if (!teamName.trim() || !adminName.trim()) {
+      setError("Заполните обязательные поля (Название и ФИО)");
       return;
     }
 
@@ -51,26 +63,38 @@ export function CreateTeamForm({ onBack, onTeamCreated }: CreateTeamFormProps) {
     try {
       const code = generateTeamCode();
 
-      const docRef = await addDoc(collection(db, "teams"), {
+      // Подготавливаем данные для Firebase
+      const teamData = {
         name: teamName.trim(),
         description: description.trim(),
         adminName: adminName.trim(),
         adminPhone: adminPhone.trim(),
         code,
         createdAt: Date.now(),
-      });
+        // 🔥 МУЛЬТИ-КОМАНДНОСТЬ: Сразу записываем создателя в массив участников
+        members: user ? [{
+          userId: user.id,
+          name: adminName.trim(),
+          role: "admin",
+          joinedAt: Date.now()
+        }] : []
+      };
 
+      // Пушим в базу данных
+      const docRef = await addDoc(collection(db, "teams"), teamData);
+
+      // Формируем объект для возврата в App.tsx
       const team: Team = {
         id: docRef.id,
-        name: teamName.trim(),
-        description: description.trim(),
-        adminName: adminName.trim(),
-        adminPhone: adminPhone.trim(),
-        code,
+        name: teamData.name,
+        description: teamData.description,
+        adminName: teamData.adminName,
+        adminPhone: teamData.adminPhone,
+        code: teamData.code,
         createdAt: new Date(),
       };
 
-      // 🔥 СРАЗУ ПЕРЕХОД В ЗАДАЧИ
+      // Переход в задачи
       onTeamCreated(team);
     } catch (e) {
       console.error(e);
@@ -101,23 +125,25 @@ export function CreateTeamForm({ onBack, onTeamCreated }: CreateTeamFormProps) {
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2">
-                <Label>Название команды</Label>
-                <Input value={teamName} onChange={(e) => setTeamName(e.target.value)} />
+                <Label>Название команды *</Label>
+                <Input value={teamName} onChange={(e) => setTeamName(e.target.value)} placeholder="Например: Проект Альфа" />
               </div>
 
               <div className="space-y-2">
                 <Label>Описание (необязательно)</Label>
-                <Textarea value={description} onChange={(e) => setDescription(e.target.value)} />
+                <Textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Для чего эта команда?" />
               </div>
 
               <div className="space-y-2">
-                <Label>Ваше ФИО</Label>
-                <Input value={adminName} onChange={(e) => setAdminName(e.target.value)} />
+                <Label>Ваше ФИО *</Label>
+                <Input value={adminName} onChange={(e) => setAdminName(e.target.value)} placeholder="Иван Иванов" />
+                {/* Подсказка для пользователя, что мы не украли имя, а взяли из TG */}
+                {user && <p className="text-xs text-muted-foreground">Имя автоматически подтянуто из Telegram</p>}
               </div>
 
               <div className="space-y-2">
-                <Label>Телефон</Label>
-                <Input value={adminPhone} onChange={(e) => setAdminPhone(e.target.value)} />
+                <Label>Телефон (необязательно)</Label>
+                <Input value={adminPhone} onChange={(e) => setAdminPhone(e.target.value)} placeholder="+7 777 000 00 00" />
               </div>
 
               {error && <p className="text-sm text-red-500">{error}</p>}

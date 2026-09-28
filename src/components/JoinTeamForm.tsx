@@ -1,5 +1,5 @@
-import { useState } from "react";
-// Добавьте импорт addDoc и collection
+// src/components/JoinTeamForm.tsx
+import { useState, useEffect } from "react";
 import { collection, addDoc, doc, getDoc } from "firebase/firestore";
 import { db } from "../services/firebaseConfig";
 import { Button } from "./ui/button";
@@ -9,6 +9,7 @@ import { Label } from "./ui/label";
 import { ArrowLeft, Clock, CheckCircle, XCircle } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
 import { findTeamByCode } from "../services/firebaseConfig";
+import { useTelegramUser } from "../hooks/useTelegramUser"; // <-- Импортируем хук
 
 interface JoinRequest {
   id: string;
@@ -16,7 +17,8 @@ interface JoinRequest {
   employeeName: string;
   employeePhone: string;
   status: 'pending' | 'approved' | 'rejected';
-  createdAt: number; // Changed from Date for Firebase compatibility
+  createdAt: number;
+  userId?: string; // <-- ДОБАВИЛИ ID ТЕЛЕГРАМА, чтобы админ знал кого одобрять
 }
 
 interface JoinTeamFormProps {
@@ -25,11 +27,21 @@ interface JoinTeamFormProps {
 }
 
 export function JoinTeamForm({ onBack, onJoinSuccess }: JoinTeamFormProps) {
+  const user = useTelegramUser(); // <-- Подхватываем юзера
+
   const [step, setStep] = useState<'form' | 'pending'>('form');
   const [teamCode, setTeamCode] = useState('');
   const [employeeName, setEmployeeName] = useState('');
   const [employeePhone, setEmployeePhone] = useState('');
   const [request, setRequest] = useState<JoinRequest | null>(null);
+
+  // 🔥 АВТОВСТАВКА: Заполняем имя из Telegram
+  useEffect(() => {
+    if (user) {
+      const fullName = `${user.firstName} ${user.lastName || ""}`.trim();
+      setEmployeeName(fullName);
+    }
+  }, [user]);
 
   const goToTasks = async (teamCodeValue: string) => {
     if (!teamCodeValue) {
@@ -57,7 +69,8 @@ export function JoinTeamForm({ onBack, onJoinSuccess }: JoinTeamFormProps) {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!teamCode.trim() || !employeeName.trim() || !employeePhone.trim()) return;
+    // Телефон теперь опционален (как договаривались), поэтому убрали жесткую проверку на него
+    if (!teamCode.trim() || !employeeName.trim()) return;
 
     const upperCaseCode = teamCode.trim().toUpperCase();
 
@@ -81,12 +94,20 @@ export function JoinTeamForm({ onBack, onJoinSuccess }: JoinTeamFormProps) {
         return;
       }
 
+      // 🔥 НОВАЯ ПРОВЕРКА НА БАН
+      if (team.banned && user && team.banned.includes(user.id)) {
+        setError("Доступ запрещен: Вы были заблокированы администратором этой команды навсегда.");
+        setLoading(false);
+        return;
+      }
+
       const newRequest = {
         teamCode: upperCaseCode,
         employeeName: employeeName.trim(),
         employeePhone: employeePhone.trim(),
         status: 'pending' as const,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        userId: user ? user.id : undefined // <-- Прикрепляем Telegram ID к заявке
       };
 
       const docRef = await addDoc(collection(db, "joinRequests"), newRequest);
@@ -103,19 +124,16 @@ export function JoinTeamForm({ onBack, onJoinSuccess }: JoinTeamFormProps) {
     if (!request || !request.id || request.id === 'temp') return;
     
     try {
-      // Тянем свежие данные напрямую из Firebase по ID заявки
       const requestRef = doc(db, "joinRequests", request.id);
       const docSnap = await getDoc(requestRef);
       
       if (docSnap.exists()) {
         const data = { id: docSnap.id, ...docSnap.data() } as JoinRequest;
         
-        // Если статус в базе изменился (например, стал 'approved')
         if (data.status !== request.status) {
-          setRequest(data); // Обновляем состояние экрана
+          setRequest(data);
           
           if (data.status === 'approved') {
-            // Если одобрили — через 2 секунды пускаем в приложение
             setTimeout(() => goToTasks(data.teamCode), 2000);
           }
         } else {
@@ -168,7 +186,7 @@ export function JoinTeamForm({ onBack, onJoinSuccess }: JoinTeamFormProps) {
               <div className="text-left space-y-2 p-4 bg-muted rounded-lg">
                 <p><strong>Код команды:</strong> {request.teamCode}</p>
                 <p><strong>Ваше ФИО:</strong> {request.employeeName}</p>
-                <p><strong>Телефон:</strong> {request.employeePhone}</p>
+                {request.employeePhone && <p><strong>Телефон:</strong> {request.employeePhone}</p>}
                 <p><strong>Статус:</strong> 
                   <span className={`ml-2 px-2 py-1 rounded-full text-xs ${
                     request.status === 'pending' ? 'bg-orange-100 text-orange-700' :
@@ -188,7 +206,7 @@ export function JoinTeamForm({ onBack, onJoinSuccess }: JoinTeamFormProps) {
               )}
 
               {request.status === 'approved' && (
-                <Button onClick={() => goToTasks(request.teamCode)}>Перейти к задачам</Button>
+                <Button onClick={() => goToTasks(request.teamCode)} className="w-full">Перейти к задачам</Button>
               )}
 
               {request.status === 'rejected' && (
@@ -229,7 +247,7 @@ export function JoinTeamForm({ onBack, onJoinSuccess }: JoinTeamFormProps) {
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="teamCode">Код команды</Label>
+                <Label htmlFor="teamCode">Код команды *</Label>
                 <Input
                   id="teamCode"
                   placeholder="Введите код команды"
@@ -242,7 +260,7 @@ export function JoinTeamForm({ onBack, onJoinSuccess }: JoinTeamFormProps) {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="employeeName">Ваше ФИО</Label>
+                <Label htmlFor="employeeName">Ваше ФИО *</Label>
                 <Input
                   id="employeeName"
                   placeholder="Иванов Иван Иванович"
@@ -250,17 +268,17 @@ export function JoinTeamForm({ onBack, onJoinSuccess }: JoinTeamFormProps) {
                   onChange={(e) => setEmployeeName(e.target.value)}
                   required
                 />
+                {user && <p className="text-xs text-muted-foreground">Имя автоматически подтянуто из Telegram</p>}
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="employeePhone">Номер телефона</Label>
+                <Label htmlFor="employeePhone">Номер телефона (необязательно)</Label>
                 <Input
                   id="employeePhone"
                   type="tel"
                   placeholder="+7 (999) 123-45-67"
                   value={employeePhone}
                   onChange={(e) => setEmployeePhone(e.target.value)}
-                  required
                 />
               </div>
 

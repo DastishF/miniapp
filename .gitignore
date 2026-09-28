@@ -1,3 +1,9 @@
+# Зависимости и кэш сборщика
+node_modules/
+.vite/
+dist/
+build/
+
 # Секреты и переменные окружения
 .env
 .env.local

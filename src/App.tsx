@@ -1,12 +1,10 @@
 // src/App.tsx
-import {
-  createTask as fbCreateTask,
-  updateTask as fbUpdateTask,
-  deleteTask as fbDeleteTask,
-  subscribeToTasks,
-} from "./services/firebaseTasks";
-
+import { createTask as fbCreateTask, updateTask as fbUpdateTask, deleteTask as fbDeleteTask, subscribeToTasks } from "./services/firebaseTasks";
 import { useState, useEffect } from "react";
+import { doc, getDoc, updateDoc, deleteDoc, onSnapshot } from "firebase/firestore";
+import { db } from "./services/firebaseConfig";
+import { useTelegramUser } from "./hooks/useTelegramUser";
+
 import { TaskItem } from "./components/TaskItem";
 import { AddTaskForm } from "./components/AddTaskForm";
 import { TaskStats } from "./components/TaskStats";
@@ -19,374 +17,225 @@ import { ThemeToggle } from "./components/ThemeToggle";
 import { NotificationBadge } from "./components/NotificationBadge";
 import { Button } from "./components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
-import { Trash2, Settings } from "lucide-react";
+import { Trash2, Settings, Building2, LogOut } from "lucide-react";
 
 declare global {
-  interface Window {
-    google: any;
-    Telegram?: {
-      WebApp: {
-        platform: string;
-        openLink: (url: string) => void;
-      };
-    };
-  }
+  interface Window { google: any; Telegram?: { WebApp: { platform: string; openLink: (url: string) => void; }; }; }
 }
 
 interface Task {
-  id: string;
-  title: string;
-  description?: string;
-  completed: boolean;
-  priority: "low" | "medium" | "high";
-  createdAt: Date;
-  archived?: boolean;
-  assignedTo?: string | null;
-  createdBy?: string | null;
-  teamId?: string | null;
-  dueDate?: string | null;
+  id: string; title: string; description?: string; completed: boolean; priority: "low" | "medium" | "high";
+  createdAt: Date; archived?: boolean; assignedTo?: string | null; createdBy?: string | null; teamId?: string | null; dueDate?: string | null;
 }
-
-interface TeamMember {
-  userId: string;
-  role: "admin" | "editor" | "viewer" | string;
-}
-
-interface Team {
-  id: string;
-  name: string;
-  description: string;
-  adminName: string;
-  adminPhone: string;
-  code: string;
-  createdAt: Date;
-  members?: TeamMember[];
-}
+interface TeamMember { userId: string; name: string; role: "admin" | "member" | string; joinedAt: number; }
+interface Team { id: string; name: string; description: string; adminName?: string; adminPhone?: string; code: string; createdAt: any; members?: TeamMember[]; }
 
 type AppMode = "team-selection" | "create-team" | "join-team" | "task-manager";
 
-// ---------- ГЛОБАЛЬНАЯ ИНТЕГРАЦИЯ GOOGLE ----------
 const addToGoogleCalendar = async (title: string, description: string, dueDate: string, token: string) => {
-  const event = {
-    summary: title,
-    description: description || 'Создано через Atrium Task',
-    start: { date: dueDate },
-    end: { date: dueDate },
-  };
-
+  const event = { summary: title, description: description || 'Создано через Atrium Task', start: { date: dueDate }, end: { date: dueDate } };
   try {
     const response = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(event),
+      method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(event),
     });
-
-    if (response.status === 401) {
-      alert("Ошибка: Google отклонил токен (401). Переподключите календарь.");
-    } else if (response.ok) {
-      console.log("Успех: Задача отправлена в Google Календарь!");
-    } else {
-      const errData = await response.json();
-      console.error(`Ошибка формата от Google ${response.status}:`, errData);
-    }
-  } catch (error: any) {
-    console.error(`Ошибка сети к Google:`, error);
-  }
+    if (response.status === 401) alert("Ошибка: Google отклонил токен (401). Переподключите календарь.");
+  } catch (error: any) { console.error(`Ошибка сети к Google:`, error); }
 };
 
 export default function App() {
+  const user = useTelegramUser(); 
   const [mode, setMode] = useState<AppMode>("team-selection");
   const [currentTeam, setCurrentTeam] = useState<Team | null>(null);
-
   const [tasks, setTasks] = useState<Task[]>([]);
   const [archivedTasks, setArchivedTasks] = useState<Task[]>([]);
-
   const [filter, setFilter] = useState<"all" | "active" | "completed">("all");
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [activeTab, setActiveTab] = useState<"tasks" | "archive" | "management">("tasks");
-
   const [googleToken, setGoogleToken] = useState<string | null>(() => localStorage.getItem("google_access_token"));
+  const [showLeaveModal, setShowLeaveModal] = useState(false);
 
-  // Подхват токена после мобильной авторизации (Telegram)
   useEffect(() => {
     const hash = window.location.hash;
     if (hash) {
       const params = new URLSearchParams(hash.substring(1));
       const accessToken = params.get("access_token");
       if (accessToken) {
-        setGoogleToken(accessToken);
-        localStorage.setItem("google_access_token", accessToken);
-        window.location.hash = "";
-        alert("Google Календарь успешно подключен!");
+        setGoogleToken(accessToken); localStorage.setItem("google_access_token", accessToken); window.location.hash = "";
       }
     }
   }, []);
 
   const handleConnectGoogle = () => {
-    if (!window.google || !window.google.accounts) {
-      alert("Google API еще загружается...");
-      return;
-    }
-
-    const isTelegramMobile = window.Telegram?.WebApp &&
-      (window.Telegram.WebApp.platform === 'android' || window.Telegram.WebApp.platform === 'ios');
-
+    if (!window.google || !window.google.accounts) return;
+    const isTelegramMobile = window.Telegram?.WebApp && (window.Telegram.WebApp.platform === 'android' || window.Telegram.WebApp.platform === 'ios');
     if (isTelegramMobile) {
-      const redirectUri = "https://miniapp-fawn-omega.vercel.app";
-      const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
-      const scope = encodeURIComponent('https://www.googleapis.com/auth/calendar.events');
-      const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${scope}`;
-
-      window.Telegram.WebApp.openLink(authUrl);
+      window.Telegram.WebApp.openLink(`https://accounts.google.com/o/oauth2/v2/auth?client_id=${import.meta.env.VITE_GOOGLE_CLIENT_ID}&redirect_uri=https://miniapp-fawn-omega.vercel.app&response_type=token&scope=https://www.googleapis.com/auth/calendar.events`);
       return;
     }
-
-    const client = window.google.accounts.oauth2.initTokenClient({
+    window.google.accounts.oauth2.initTokenClient({
       client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
       scope: 'https://www.googleapis.com/auth/calendar.events',
-      callback: (response: any) => {
-        if (response.access_token) {
-          setGoogleToken(response.access_token);
-          localStorage.setItem("google_access_token", response.access_token);
-          alert("Google Календарь успешно подключен!");
-        }
-      },
-    });
-    client.requestAccessToken();
+      callback: (response: any) => { if (response.access_token) { setGoogleToken(response.access_token); localStorage.setItem("google_access_token", response.access_token); } },
+    }).requestAccessToken();
   };
 
-  // Инициализация скриптов и локальных данных
   useEffect(() => {
     if (!window.google || !window.google.accounts) {
-      const script = document.createElement('script');
-      script.src = 'https://accounts.google.com/gsi/client';
-      script.async = true;
-      script.defer = true;
-      document.head.appendChild(script);
+      const script = document.createElement('script'); script.src = 'https://accounts.google.com/gsi/client'; script.async = true; document.head.appendChild(script);
     }
-
     const savedTeam = localStorage.getItem("currentTeam");
-    if (savedTeam) {
-      try {
-        setCurrentTeam(JSON.parse(savedTeam));
-        setMode("task-manager");
-        return;
-      } catch (e) {
-        console.error("Error parsing team:", e);
-      }
-    }
-
+    if (savedTeam) { try { setCurrentTeam(JSON.parse(savedTeam)); setMode("task-manager"); return; } catch (e) {} }
     const savedTasks = localStorage.getItem("tasks");
-    if (savedTasks) {
-      try {
-        setTasks(JSON.parse(savedTasks).map((t: any) => ({ ...t, createdAt: new Date(t.createdAt) })));
-      } catch (e) {}
-    }
-
-    const savedArchive = localStorage.getItem("archivedTasks");
-    if (savedArchive) {
-      try {
-        setArchivedTasks(JSON.parse(savedArchive).map((t: any) => ({ ...t, createdAt: new Date(t.createdAt) })));
-      } catch (e) {}
-    }
+    if (savedTasks) { try { setTasks(JSON.parse(savedTasks).map((t: any) => ({ ...t, createdAt: new Date(t.createdAt) }))); } catch (e) {} }
   }, []);
 
-  // Подписка на Firebase
   useEffect(() => {
-    if (!currentTeam) return;
+    if (!currentTeam || !user) return;
+    if (currentTeam.id === 'demo-team-id') return;
+    
+    const unsubscribeTeam = onSnapshot(doc(db, "teams", currentTeam.id), (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        const members = data.members || [];
+        const isStillMember = data.code === 'DEMO24' || members.some((m: any) => String(m.userId) === String(user.id));
+        
+        if (!isStillMember) {
+          localStorage.removeItem("currentTeam"); setCurrentTeam(null); setMode("team-selection");
+        } else {
+          const updatedTeam = { id: snap.id, ...data } as Team;
+          setCurrentTeam(updatedTeam); localStorage.setItem("currentTeam", JSON.stringify(updatedTeam));
+        }
+      } else {
+        localStorage.removeItem("currentTeam"); setCurrentTeam(null); setMode("team-selection");
+      }
+    });
+    return () => unsubscribeTeam();
+  }, [currentTeam?.id, user]);
+
+  useEffect(() => {
+    if (!currentTeam) { setTasks([]); setArchivedTasks([]); return; }
+    if (currentTeam.id === 'demo-team-id') return;
 
     const unsubscribe = subscribeToTasks(currentTeam.id, (firebaseTasks) => {
-      const active = firebaseTasks.filter((t) => !t.archived).map((t) => ({ ...t, createdAt: new Date(t.createdAt) }));
-      const archived = firebaseTasks.filter((t) => t.archived).map((t) => ({ ...t, createdAt: new Date(t.createdAt) }));
-
-      setTasks(active);
-      setArchivedTasks(archived);
+      setTasks(firebaseTasks.filter((t) => !t.archived).map((t) => ({ ...t, createdAt: new Date(t.createdAt) })));
+      setArchivedTasks(firebaseTasks.filter((t) => t.archived).map((t) => ({ ...t, createdAt: new Date(t.createdAt) })));
     });
+    return () => { try { unsubscribe(); } catch (e) {} };
+  }, [currentTeam?.id]);
 
-    return () => {
-      try { unsubscribe(); } catch (e) {}
-    };
-  }, [currentTeam]);
-
-  // Локальное сохранение (если не в команде)
-  useEffect(() => {
-    if (currentTeam) return;
-    localStorage.setItem("tasks", JSON.stringify(tasks));
-  }, [tasks, currentTeam]);
-
-  useEffect(() => {
-    if (currentTeam) return;
-    localStorage.setItem("archivedTasks", JSON.stringify(archivedTasks));
-  }, [archivedTasks, currentTeam]);
-
-  // ---------- ПАРАЛЛЕЛЬНОЕ ДОБАВЛЕНИЕ ЗАДАЧИ ----------
   const addTask = async (taskData: Omit<Task, "id" | "completed" | "createdAt"> & { dueDate?: string | null }) => {
     const savedToken = localStorage.getItem("google_access_token");
+    try { await Promise.allSettled([
+      taskData.dueDate && savedToken ? addToGoogleCalendar(taskData.title, taskData.description || '', taskData.dueDate.split('T')[0].trim(), savedToken) : Promise.resolve(),
+      currentTeam && currentTeam.id !== 'demo-team-id' ? fbCreateTask({ ...taskData, completed: false, archived: false, teamId: currentTeam.id, createdAt: Date.now() }) : Promise.resolve()
+    ]); } catch (e) {}
+  };
 
-    // Задача 1: Отправка в Google (Асинхронная)
-    const googleAction = async () => {
-      if (taskData.dueDate && savedToken) {
-        const cleanDate = taskData.dueDate.split('T')[0].trim();
-        await addToGoogleCalendar(taskData.title, taskData.description || '', cleanDate, savedToken);
-      }
-    };
+  const toggleTaskComplete = async (id: string) => { if (currentTeam) try { await fbUpdateTask(id, { completed: !(tasks.find((x) => x.id === id) || archivedTasks.find((x) => x.id === id))?.completed }); } catch (e) {} };
+  const archiveTask = async (id: string) => { if (currentTeam) try { await fbUpdateTask(id, { archived: true }); } catch (e) {} };
+  const restoreTask = async (id: string) => { if (currentTeam) try { await fbUpdateTask(id, { archived: false }); } catch (e) {} };
+  const deleteArchivedPermanently = async (id: string) => { if (currentTeam) try { await fbDeleteTask(id); } catch (e) {} };
+  const clearCompleted = async () => { if (currentTeam) for (const t of tasks.filter((t) => t.completed)) try { await fbUpdateTask(t.id, { archived: true }); } catch (e) {} };
+  const clearArchive = async () => { if (currentTeam) for (const t of archivedTasks) try { await fbDeleteTask(t.id); } catch (e) {} };
+  const handleUpdateTask = async (updatedTask: Task) => { if (currentTeam) try { await fbUpdateTask(updatedTask.id, { title: updatedTask.title, description: updatedTask.description, priority: updatedTask.priority, dueDate: updatedTask.dueDate }); } catch (e) {} };
 
-    // Задача 2: Отправка в Firebase или локальный стейт (Асинхронная)
-    const firebaseAction = async () => {
-      if (currentTeam) {
-        await fbCreateTask({
-          ...taskData,
-          completed: false,
-          archived: false,
-          teamId: currentTeam.id,
-          createdAt: Date.now(),
-        });
-      } else {
-        const newTask: Task = {
-          id: crypto.randomUUID(),
-          completed: false,
-          createdAt: new Date(),
-          archived: false,
-          ...taskData,
-        };
-        setTasks((prev) => [newTask, ...prev]);
-      }
-    };
+  const handleSelectTeam = (team: Team) => { setCurrentTeam(team); setMode("task-manager"); };
+  const handleSwitchTeam = () => { setMode("team-selection"); };
 
-    // ЗАПУСК ОБОИХ ПРОЦЕССОВ ПАРАЛЛЕЛЬНО
-    // Promise.allSettled гарантирует, что даже если Firebase упадет, Google отработает (и наоборот)
+  const handleLeaveTeamConfirm = async () => {
+    if (!currentTeam || !user) return;
+    
+    if (currentTeam.id === 'demo-team-id' || currentTeam.code === 'DEMO24') {
+      localStorage.removeItem("currentTeam"); setCurrentTeam(null); setShowLeaveModal(false); setMode("team-selection"); return;
+    }
+
     try {
-      await Promise.allSettled([googleAction(), firebaseAction()]);
-    } catch (e) {
-      console.error("Критическая ошибка при добавлении задачи:", e);
-    }
-  };
+      const teamRef = doc(db, "teams", currentTeam.id);
+      const teamSnap = await getDoc(teamRef);
+      
+      if (teamSnap.exists()) {
+        const teamData = teamSnap.data();
+        let members = teamData.members || [];
+        
+        const myInfo = members.find((m: any) => String(m.userId) === String(user.id));
+        members = members.filter((m: any) => String(m.userId) !== String(user.id));
 
-  const toggleTaskComplete = async (id: string) => {
-    const t = tasks.find((x) => x.id === id) || archivedTasks.find((x) => x.id === id);
-    if (!t) return;
+        if (myInfo && myInfo.role === 'admin') {
+          const remainingAdmins = members.filter((m: any) => m.role === 'admin');
+          if (remainingAdmins.length === 0 && members.length > 0) {
+            members.sort((a: any, b: any) => a.joinedAt - b.joinedAt);
+            members[0].role = 'admin';
+          }
+        }
 
-    if (currentTeam) {
-      try { await fbUpdateTask(id, { completed: !t.completed }); } catch (e) {}
-    } else {
-      setTasks((prev) => prev.map((task) => (task.id === id ? { ...task, completed: !task.completed } : task)));
-    }
-  };
-
-  const archiveTask = async (id: string) => {
-    const t = tasks.find((x) => x.id === id);
-    if (!t) return;
-
-    if (currentTeam) {
-      try { await fbUpdateTask(id, { archived: true }); } catch (e) {}
-    } else {
-      setTasks((prev) => prev.filter((x) => x.id !== id));
-      setArchivedTasks((prev) => [{ ...t, archived: true }, ...prev]);
-    }
-  };
-
-  const restoreTask = async (id: string) => {
-    const t = archivedTasks.find((x) => x.id === id);
-    if (!t) return;
-
-    if (currentTeam) {
-      try { await fbUpdateTask(id, { archived: false }); } catch (e) {}
-    } else {
-      setArchivedTasks((prev) => prev.filter((x) => x.id !== id));
-      setTasks((prev) => [{ ...t, archived: false }, ...prev]);
-    }
-  };
-
-  const deleteArchivedPermanently = async (id: string) => {
-    if (currentTeam) {
-      try { await fbDeleteTask(id); } catch (e) {}
-    } else {
-      setArchivedTasks((prev) => prev.filter((x) => x.id !== id));
-    }
-  };
-
-  const clearCompleted = async () => {
-    if (currentTeam) {
-      const toArchive = tasks.filter((t) => t.completed);
-      for (const t of toArchive) {
-        try { await fbUpdateTask(t.id, { archived: true }); } catch (e) {}
+        if (members.length === 0) {
+          await deleteDoc(teamRef);
+        } else {
+          await updateDoc(teamRef, { members });
+        }
+        
+        localStorage.removeItem("currentTeam");
+        setCurrentTeam(null);
+        setShowLeaveModal(false);
+        setMode("team-selection");
       }
-    } else {
-      setTasks((prev) => prev.filter((task) => !task.completed));
+    } catch (e: any) {
+      console.error("Ошибка при выходе из команды:", e);
+      alert("Ошибка при выходе из команды: " + e.message);
     }
   };
 
-  const clearArchive = async () => {
-    if (currentTeam) {
-      for (const t of archivedTasks) {
-        try { await fbDeleteTask(t.id); } catch (e) {}
-      }
-    } else {
-      setArchivedTasks([]);
-    }
-  };
+  const filteredTasks = tasks.filter((task) => filter === "active" ? !task.completed : filter === "completed" ? task.completed : true);
+  const taskCounts = { all: tasks.length, active: tasks.filter((t) => !t.completed).length, completed: tasks.filter((t) => t.completed).length };
 
-  const handleUpdateTask = async (updatedTask: Task) => {
-    if (currentTeam) {
-      try {
-        await fbUpdateTask(updatedTask.id, {
-          title: updatedTask.title,
-          description: updatedTask.description,
-          priority: updatedTask.priority,
-          dueDate: updatedTask.dueDate,
-        });
-      } catch (e) {}
-    } else {
-      setTasks((prev) => prev.map((t) => (t.id === updatedTask.id ? updatedTask : t)));
-      setEditingTask(null);
-    }
-  };
-
-  const handleLogout = () => {
-    localStorage.removeItem("currentTeam");
-    setCurrentTeam(null);
-    setMode("team-selection");
-  };
-
-  const filteredTasks = tasks.filter((task) => {
-    if (filter === "active") return !task.completed;
-    if (filter === "completed") return task.completed;
-    return true;
-  });
-
-  const taskCounts = {
-    all: tasks.length,
-    active: tasks.filter((t) => !t.completed).length,
-    completed: tasks.filter((t) => t.completed).length,
-  };
-
-  if (mode === "team-selection") {
-    return <TeamSelection onCreateTeam={() => setMode("create-team")} onJoinTeam={() => setMode("join-team")} />;
-  }
-
-  if (mode === "create-team") {
-    return <CreateTeamForm onBack={() => setMode("team-selection")} onTeamCreated={(team) => { setCurrentTeam(team); localStorage.setItem("currentTeam", JSON.stringify(team)); setMode("task-manager"); }} />;
-  }
-
-  if (mode === "join-team") {
-    return <JoinTeamForm onBack={() => setMode("team-selection")} onJoinSuccess={(teamData) => { if (teamData && typeof teamData === 'object' && 'id' in teamData) { setCurrentTeam(teamData); localStorage.setItem("currentTeam", JSON.stringify(teamData)); setMode("task-manager"); } else { const saved = localStorage.getItem("currentTeam"); if (saved) { setCurrentTeam(JSON.parse(saved)); setMode("task-manager"); } } }} />;
-  }
+  if (mode === "team-selection") return <TeamSelection onCreateTeam={() => setMode("create-team")} onJoinTeam={() => setMode("join-team")} onSelectTeam={handleSelectTeam} />;
+  if (mode === "create-team") return <CreateTeamForm onBack={() => setMode("team-selection")} onTeamCreated={(team) => { setCurrentTeam(team); localStorage.setItem("currentTeam", JSON.stringify(team)); setMode("task-manager"); }} />;
+  if (mode === "join-team") return <JoinTeamForm onBack={() => setMode("team-selection")} onJoinSuccess={() => { const saved = localStorage.getItem("currentTeam"); if (saved) { setCurrentTeam(JSON.parse(saved)); setMode("task-manager"); } }} />;
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background relative">
+      {/* 🔥 ИСПРАВЛЕННОЕ МОДАЛЬНОЕ ОКНО ВЫХОДА (Строгие 360px) */}
+      {showLeaveModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div 
+            style={{ maxWidth: '360px', width: '100%' }}
+            className="bg-card rounded-2xl shadow-xl border overflow-hidden p-6 text-center animate-in fade-in zoom-in-95 duration-200 mx-auto"
+          >
+            <div className="mx-auto w-12 h-12 bg-red-100 dark:bg-red-900/30 rounded-full flex items-center justify-center mb-4">
+              <LogOut className="h-6 w-6 text-red-600 dark:text-red-500" />
+            </div>
+            <h3 className="text-lg font-bold mb-2">Выйти из команды?</h3>
+            <p className="text-sm text-muted-foreground mb-6">
+              Вы действительно хотите покинуть команду <strong className="text-foreground">{currentTeam?.name}</strong>?
+            </p>
+            <div className="flex gap-3 justify-center">
+              <Button variant="outline" className="flex-1" onClick={() => setShowLeaveModal(false)}>Отмена</Button>
+              <Button variant="destructive" className="flex-1" onClick={handleLeaveTeamConfirm}>Да, выйти</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-md mx-auto px-4 py-6">
-        <div className="flex items-center justify-between mb-6">
-          <h1 className="text-xl font-bold">Менеджер Задач</h1>
-          <div className="flex items-center gap-2">
-            <ThemeToggle />
-            
+        <div className="flex flex-col mb-6 gap-4">
+          <div className="flex items-center justify-between">
+            <h1 className="text-xl font-bold">Менеджер Задач</h1>
+            <div className="flex items-center gap-2">
+              <ThemeToggle />
+              <Button variant="ghost" size="sm" onClick={() => setShowLeaveModal(true)} className="text-red-500 hover:text-red-600 hover:bg-red-100 dark:hover:bg-red-950">
+                <LogOut className="h-4 w-4 mr-1" /> Выйти
+              </Button>
+            </div>
+          </div>
+          
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" onClick={handleSwitchTeam} className="flex-1 justify-start gap-2 border-primary/20 hover:bg-primary/5">
+              <Building2 className="h-4 w-4 text-primary" />
+              <span className="truncate max-w-[120px]">{currentTeam ? currentTeam.name : "Без команды"}</span>
+            </Button>
             <Button variant={googleToken ? "secondary" : "outline"} size="sm" onClick={handleConnectGoogle} className={googleToken ? "text-green-600 border-green-200" : ""}>
               {googleToken ? "📅 Подключен" : "📅 Календарь"}
             </Button>
-            <Button variant="ghost" size="sm" onClick={handleLogout}>Выйти</Button>
           </div>
         </div>
 
@@ -403,26 +252,16 @@ export default function App() {
           <TabsContent value="tasks" className="mt-6 space-y-6">
             <TaskStats tasks={tasks} />
             <TaskFilter currentFilter={filter} onFilterChange={setFilter} taskCounts={taskCounts} />
-            {taskCounts.completed > 0 && (
-              <Button variant="outline" size="sm" onClick={clearCompleted} className="w-full">
-                <Trash2 className="h-4 w-4 mr-2" /> Очистить выполненные
-              </Button>
-            )}
+            {taskCounts.completed > 0 && <Button variant="outline" size="sm" onClick={clearCompleted} className="w-full"><Trash2 className="h-4 w-4 mr-2" /> Очистить выполненные</Button>}
             <div className="space-y-3 pb-24">
-              {filteredTasks.map((task) => (
-                <TaskItem key={task.id} task={task} onToggleComplete={toggleTaskComplete} onDelete={archiveTask} onEdit={setEditingTask} />
-              ))}
+              {filteredTasks.map((task) => <TaskItem key={task.id} task={task} onToggleComplete={toggleTaskComplete} onDelete={archiveTask} onEdit={setEditingTask} />)}
             </div>
-            
-            {/* Форма задач (микрофон и Gemini работают внутри неё) */}
             <AddTaskForm onAddTask={addTask} editingTask={editingTask} onUpdateTask={handleUpdateTask} onCancelEdit={() => setEditingTask(null)} />
           </TabsContent>
 
           <TabsContent value="archive" className="mt-6 space-y-6">
             <h2 className="text-lg font-semibold">Архив задач</h2>
-            {archivedTasks.length === 0 ? (
-              <p className="text-muted-foreground text-center py-6">Архив пуст</p>
-            ) : (
+            {archivedTasks.length === 0 ? <p className="text-muted-foreground text-center py-6">Архив пуст</p> : (
               <div className="space-y-3">
                 {archivedTasks.map((task) => (
                   <div key={task.id} className="border rounded-lg p-4 bg-muted flex justify-between items-center">
@@ -438,19 +277,11 @@ export default function App() {
                 ))}
               </div>
             )}
-            {archivedTasks.length > 0 && (
-              <Button variant="destructive" className="w-full" onClick={clearArchive}>Очистить архив</Button>
-            )}
+            {archivedTasks.length > 0 && <Button variant="destructive" className="w-full" onClick={clearArchive}>Очистить архив</Button>}
           </TabsContent>
 
           <TabsContent value="management" className="mt-6">
-            {currentTeam && <TeamManagement teamCode={currentTeam.code} />}
-            {!currentTeam && (
-              <div className="text-center py-6">
-                <p className="text-muted-foreground mb-4">Вы не в команде — управление недоступно</p>
-                <Button onClick={() => setMode("team-selection")}>Присоединиться</Button>
-              </div>
-            )}
+            {currentTeam && <TeamManagement team={currentTeam} />}
           </TabsContent>
         </Tabs>
       </div>
