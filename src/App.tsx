@@ -56,108 +56,84 @@ export default function App() {
 
 // 1. Кнопка подключения
   const handleConnectGoogle = () => {
-    const redirectUri = "https://miniapp-tewy.vercel.app";
-    const isTelegram = Boolean(window.Telegram?.WebApp);
+  const redirectUri = "https://miniapp-tewy.vercel.app";
+  const isTelegram = Boolean(window.Telegram?.WebApp);
+  // Берём Telegram ID пользователя (или запасной ID)
+  const telegramUserId = user?.id || window.Telegram?.WebApp?.initDataUnsafe?.user?.id || "guest";
 
-    if (isTelegram) {
-      const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${import.meta.env.VITE_GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=https://www.googleapis.com/auth/calendar.events`;
-      window.Telegram.WebApp.openLink(authUrl);
-      return;
-    }
+  if (isTelegram) {
+    // Передаем ID в параметр &state
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${import.meta.env.VITE_GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent("https://www.googleapis.com/auth/calendar.events")}&state=${telegramUserId}`;
+    window.Telegram.WebApp.openLink(authUrl);
+    return;
+  }
 
-    if (window.google?.accounts) {
-      window.google.accounts.oauth2.initTokenClient({
-        client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
-        scope: 'https://www.googleapis.com/auth/calendar.events',
-        callback: (response: any) => { 
-          if (response.access_token) { 
-            setGoogleToken(response.access_token); 
-            localStorage.setItem("google_access_token", response.access_token); 
-            localStorage.setItem("google_token_expires_at", (Date.now() + 3600 * 1000).toString());
-          } 
-        },
-      }).requestAccessToken();
+  if (window.google?.accounts) {
+    window.google.accounts.oauth2.initTokenClient({
+      client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
+      scope: 'https://www.googleapis.com/auth/calendar.events',
+      callback: (response: any) => { 
+        if (response.access_token) { 
+          setGoogleToken(response.access_token); 
+          localStorage.setItem("google_access_token", response.access_token); 
+        } 
+      },
+    }).requestAccessToken();
+  }
+};
+
+  // 2. Перехват в обычном браузере после входа в Google
+  useEffect(() => {
+  const handleGoogleCallback = async () => {
+    const hash = window.location.hash.substring(1);
+    const params = new URLSearchParams(hash);
+    const accessToken = params.get("access_token");
+    const telegramUserId = params.get("state"); // Читаем ID пользователя
+
+    if (accessToken && telegramUserId) {
+      window.location.hash = "";
+
+      try {
+        // Сохраняем токен прямо под ID пользователя в Firestore
+        await setDoc(doc(db, "gcal_tokens", String(telegramUserId)), {
+          token: accessToken,
+          updatedAt: Date.now(),
+        });
+
+        // Показываем кнопку возврата или перенаправляем в бота
+        window.location.href = "https://t.me/atriumtask_bot";
+      } catch (err: any) {
+        console.error("Ошибка сохранения токена:", err);
+      }
     }
   };
 
-  // 2. ДИАГНОСТИКА: Перехват в обычном браузере после входа в Google
+  handleGoogleCallback();
+}, []);
+
+// 3. Выводим данные о параметрах при КАЖДОМ запуске
   useEffect(() => {
-    const handleGoogleCallback = async () => {
-      const hash = window.location.hash.substring(1);
-      const params = new URLSearchParams(hash);
-      const accessToken = params.get("access_token");
+  const syncCalendarToken = async () => {
+    const telegramUserId = user?.id || window.Telegram?.WebApp?.initDataUnsafe?.user?.id;
+    if (!telegramUserId) return;
 
-      if (accessToken) {
-        window.location.hash = "";
-        const sessionId = "s_" + Math.random().toString(36).substring(2, 11);
-        
-        // ⚠️ Проверь юзернейм бота (без @)
-        const botUsername = "atriumtask_bot"; 
+    try {
+      // Проверяем, появился ли токен для этого пользователя в базе
+      const docRef = doc(db, "gcal_tokens", String(telegramUserId));
+      const docSnap = await getDoc(docRef);
 
-        try {
-          alert("📍 Шаг 1: Токен получен. Сохраняем в Firestore...");
-          await setDoc(doc(db, "gcal_sessions", sessionId), {
-            token: accessToken,
-            createdAt: Date.now(),
-          });
-          
-          alert(`📍 Шаг 2: Успешно записано! Ключ ${sessionId}. Переходим в Telegram...`);
-          window.location.href = `https://t.me/${botUsername}/app?startapp=${sessionId}`;
-        } catch (err: any) {
-          alert("❌ ОШИБКА на Шаге 1-2 (Firestore): " + err.message);
-        }
+      if (docSnap.exists()) {
+        const { token } = docSnap.data();
+        setGoogleToken(token);
+        localStorage.setItem("google_access_token", token);
       }
-    };
+    } catch (e) {
+      console.error("Ошибка синхронизации календаря:", e);
+    }
+  };
 
-    handleGoogleCallback();
-  }, []);
-
-// 3. ДИАГНОСТИКА TELEGRAM: Выводим данные о параметрах при КАЖДОМ запуске
-  useEffect(() => {
-    const checkDeepLinkSession = async () => {
-      const tg = window.Telegram?.WebApp;
-      
-      // Если запускаем НЕ из Telegram — пропускаем
-      if (!tg) return;
-
-      const urlParams = new URLSearchParams(window.location.search);
-      const urlStartParam = urlParams.get("tgWebAppStartParam");
-      const tgStartParam = tg.initDataUnsafe?.start_param;
-
-      const startParam = tgStartParam || urlStartParam;
-
-      // 🔥 Выводим диалоговое окно ВСЕГДА при запуске в Telegram
-      alert(`📍 Шаг 3 (Диагностика Telegram):
-SDK start_param: "${tgStartParam || "ПУСТО"}"
-URL tgWebAppStartParam: "${urlStartParam || "ПУСТО"}"`);
-
-      if (startParam && startParam.startsWith("s_")) {
-        try {
-          const docRef = doc(db, "gcal_sessions", startParam);
-          const docSnap = await getDoc(docRef);
-
-          if (docSnap.exists()) {
-            const { token } = docSnap.data();
-
-            setGoogleToken(token);
-            localStorage.setItem("google_access_token", token);
-            localStorage.setItem("google_token_expires_at", (Date.now() + 3600 * 1000).toString());
-
-            await deleteDoc(docRef);
-            window.history.replaceState({}, document.title, window.location.pathname);
-
-            alert("🎉 Шаг 4: УСПЕХ! Календарь подключен!");
-          } else {
-            alert(`❌ ОШИБКА Шага 4: Документ ${startParam} не найден в Firestore!`);
-          }
-        } catch (e: any) {
-          alert("❌ ОШИБКА Шага 4 (Firestore): " + e.message);
-        }
-      }
-    };
-
-    checkDeepLinkSession();
-  }, []);
+  syncCalendarToken();
+}, [user?.id]);
 
   useEffect(() => {
     if (!window.google || !window.google.accounts) {
