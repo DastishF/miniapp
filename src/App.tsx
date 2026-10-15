@@ -112,18 +112,26 @@ export default function App() {
     handleGoogleCallback();
   }, []);
 
-  // 3. ДИАГНОСТИКА: Приём ключа внутри Telegram Mini App
+// 3. ДИАГНОСТИКА TELEGRAM: Выводим данные о параметрах при КАЖДОМ запуске
   useEffect(() => {
     const checkDeepLinkSession = async () => {
+      const tg = window.Telegram?.WebApp;
+      
+      // Если запускаем НЕ из Telegram — пропускаем
+      if (!tg) return;
+
       const urlParams = new URLSearchParams(window.location.search);
       const urlStartParam = urlParams.get("tgWebAppStartParam");
-      const tgStartParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param;
+      const tgStartParam = tg.initDataUnsafe?.start_param;
 
       const startParam = tgStartParam || urlStartParam;
 
+      // 🔥 Выводим диалоговое окно ВСЕГДА при запуске в Telegram
+      alert(`📍 Шаг 3 (Диагностика Telegram):
+SDK start_param: "${tgStartParam || "ПУСТО"}"
+URL tgWebAppStartParam: "${urlStartParam || "ПУСТО"}"`);
+
       if (startParam && startParam.startsWith("s_")) {
-        alert("📍 Шаг 3: Telegram открыл Mini App с ключом: " + startParam);
-        
         try {
           const docRef = doc(db, "gcal_sessions", startParam);
           const docSnap = await getDoc(docRef);
@@ -138,19 +146,17 @@ export default function App() {
             await deleteDoc(docRef);
             window.history.replaceState({}, document.title, window.location.pathname);
 
-            alert("🎉 Шаг 4: УСПЕХ! Токен считан из базы, Календарь подключен!");
+            alert("🎉 Шаг 4: УСПЕХ! Календарь подключен!");
           } else {
-            alert("❌ ОШИБКА Шага 4: Документ с ключом " + startParam + " не найден в Firestore!");
+            alert(`❌ ОШИБКА Шага 4: Документ ${startParam} не найден в Firestore!`);
           }
         } catch (e: any) {
-          alert("❌ ОШИБКА Шага 4 (Чтение Firestore): " + e.message);
+          alert("❌ ОШИБКА Шага 4 (Firestore): " + e.message);
         }
       }
     };
 
     checkDeepLinkSession();
-    const timer = setTimeout(checkDeepLinkSession, 800);
-    return () => clearTimeout(timer);
   }, []);
 
   useEffect(() => {
