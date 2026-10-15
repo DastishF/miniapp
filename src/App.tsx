@@ -66,18 +66,49 @@ export default function App() {
   }, []);
 
   const handleConnectGoogle = () => {
-    if (!window.google || !window.google.accounts) return;
-    const isTelegramMobile = window.Telegram?.WebApp && (window.Telegram.WebApp.platform === 'android' || window.Telegram.WebApp.platform === 'ios');
-    if (isTelegramMobile) {
-      window.Telegram.WebApp.openLink(`https://accounts.google.com/o/oauth2/v2/auth?client_id=${import.meta.env.VITE_GOOGLE_CLIENT_ID}&redirect_uri=https://miniapp-fawn-omega.vercel.app&response_type=token&scope=https://www.googleapis.com/auth/calendar.events`);
-      return;
-    }
+  // Наш основной рабочий URI с файлом редиректа
+  const redirectUri = "https://miniapp-tewy.vercel.app/google-callback.html";
+
+  const isTelegram = Boolean(window.Telegram?.WebApp);
+
+  if (isTelegram) {
+    // В Telegram открываем OAuth через системный браузер с новым redirect_uri
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${import.meta.env.VITE_GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=https://www.googleapis.com/auth/calendar.events`;
+    window.Telegram.WebApp.openLink(authUrl);
+    return;
+  }
+
+  // Обычный веб-браузер (без Telegram)
+  if (window.google?.accounts) {
     window.google.accounts.oauth2.initTokenClient({
       client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
       scope: 'https://www.googleapis.com/auth/calendar.events',
-      callback: (response: any) => { if (response.access_token) { setGoogleToken(response.access_token); localStorage.setItem("google_access_token", response.access_token); } },
+      callback: (response: any) => { 
+        if (response.access_token) { 
+          setGoogleToken(response.access_token); 
+          localStorage.setItem("google_access_token", response.access_token); 
+          localStorage.setItem("google_token_expires_at", (Date.now() + 3600 * 1000).toString());
+        } 
+      },
     }).requestAccessToken();
-  };
+  }
+};
+
+useEffect(() => {
+  const tg = window.Telegram?.WebApp;
+  const startParam = tg?.initDataUnsafe?.start_param;
+
+  if (startParam && startParam.startsWith("gcal_")) {
+    const token = startParam.replace("gcal_", "");
+    
+    // Сохраняем полученный токен
+    setGoogleToken(token);
+    localStorage.setItem("google_access_token", token);
+    localStorage.setItem("google_token_expires_at", (Date.now() + 3600 * 1000).toString());
+
+    alert("Google Календарь успешно подключен!");
+  }
+}, []);
 
   useEffect(() => {
     if (!window.google || !window.google.accounts) {
