@@ -117,39 +117,53 @@ export default function App() {
     handleGoogleCallback();
   }, []);
 
-  // 3. ПРИЁМ В TELEGRAM: Читаем короткий ключ, достаем токен из Firestore
-  useEffect(() => {
-    const checkDeepLinkSession = async () => {
-      const tg = window.Telegram?.WebApp;
-      const startParam = tg?.initDataUnsafe?.start_param;
+// 3. ПРИЁМ В TELEGRAM: Двойная проверка ключа (из SDK и из URL-параметров)
+useEffect(() => {
+  const checkDeepLinkSession = async () => {
+    // 1. Проверяем URL query параметры
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlStartParam = urlParams.get("tgWebAppStartParam");
 
-      // Если в Telegram пришел наш короткий ключ
-      if (startParam && startParam.startsWith("s_")) {
-        try {
-          const docRef = doc(db, "gcal_sessions", startParam);
-          const docSnap = await getDoc(docRef);
+    // 2. Проверяем SDK Telegram
+    const tgStartParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param;
 
-          if (docSnap.exists()) {
-            const { token } = docSnap.data();
+    // Берем любой доступный ключ
+    const startParam = tgStartParam || urlStartParam;
 
-            // Сохраняем access_token в приложении
-            setGoogleToken(token);
-            localStorage.setItem("google_access_token", token);
-            localStorage.setItem("google_token_expires_at", (Date.now() + 3600 * 1000).toString());
+    if (startParam && startParam.startsWith("s_")) {
+      try {
+        const docRef = doc(db, "gcal_sessions", startParam);
+        const docSnap = await getDoc(docRef);
 
-            // Удаляем временный документ (токен больше не нужен в базе)
-            await deleteDoc(docRef);
+        if (docSnap.exists()) {
+          const { token } = docSnap.data();
 
-            alert("Google Календарь успешно подключен!");
-          }
-        } catch (e) {
-          console.error("Ошибка получения токена Google Календаря:", e);
+          // Сохраняем токен в Telegram WebView
+          setGoogleToken(token);
+          localStorage.setItem("google_access_token", token);
+          localStorage.setItem("google_token_expires_at", (Date.now() + 3600 * 1000).toString());
+
+          // Удаляем одноразовую сессию из базы
+          await deleteDoc(docRef);
+
+          // Очищаем параметры из адресной строки
+          window.history.replaceState({}, document.title, window.location.pathname);
+
+          alert("Google Календарь успешно подключен в Telegram!");
         }
+      } catch (e) {
+        console.error("Ошибка получения токена Google Календаря:", e);
       }
-    };
+    }
+  };
 
-    checkDeepLinkSession();
-  }, []);
+  // Проверяем сразу при запуске
+  checkDeepLinkSession();
+
+  // Страховочная проверка через 500мс для медленно грузящихся устройств
+  const timer = setTimeout(checkDeepLinkSession, 500);
+  return () => clearTimeout(timer);
+}, []);
 
   useEffect(() => {
     if (!window.google || !window.google.accounts) {
